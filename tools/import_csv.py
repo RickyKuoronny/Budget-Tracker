@@ -63,7 +63,7 @@ def import_file(conn: sqlite3.Connection, filepath: Path, account: str) -> tuple
             inserted += 1
         except sqlite3.IntegrityError:
             skipped += 1
-            print(f'    DUPE: {date_val} | {desc_val} | {amt_val} | {bal_val}')
+            # print(f'    DUPE: {date_val} | {desc_val} | {amt_val} | {bal_val}')
 
     conn.commit()
     return inserted, skipped
@@ -86,14 +86,14 @@ def main() -> None:
     for filename in filenames:
         filepath = project_root / filename
         if not filepath.exists():
-            print(f'  ✗ Not found: {filepath}')
+            print(f'  Not found: {filepath}')
             continue
 
         account = ACCOUNT_MAP.get(filename, filename.replace('.csv', ''))
         inserted, skipped = import_file(conn, filepath, account)
         total_inserted += inserted
         total_skipped += skipped
-        print(f'  ✓ {filename} → {inserted} new, {skipped} duplicates skipped')
+        print(f'  OK {filename} -> {inserted} new, {skipped} duplicates skipped')
 
     conn.close()
     print(f'\nDone. {total_inserted} new transactions added to {DB_PATH.name}')

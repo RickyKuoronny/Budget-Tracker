@@ -43,6 +43,20 @@ if not DB_PATH.exists():
     st.warning('No database found. Run `python tools/import_csv.py` to import your CSV files first.')
     st.stop()
 
+
+with st.sidebar:
+    st.header('DATA Import')
+    if st.button('Import CSVs', use_container_width=True):
+        import subprocess
+        result = subprocess.run(
+            ['python', 'tools/import_csv.py'],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            st.success(result.stdout)
+        else:
+            st.error(result.stderr)
+
 tabs = st.tabs(ACCOUNTS)
 
 for tab, account in zip(tabs, ACCOUNTS):
