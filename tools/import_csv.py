@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / 'transactions.db'
+CSV_DIR = Path(__file__).parent.parent / "CSV FILES"
 
 ACCOUNT_MAP = {
     'EVERYDAY OPTIONS.csv': 'Everyday',
@@ -75,8 +76,7 @@ def main() -> None:
         filenames = sys.argv[1:]
     else:
         filenames = DEFAULT_FILES
-
-    project_root = Path(__file__).parent.parent
+        
     conn = sqlite3.connect(DB_PATH)
     init_db(conn)
 
@@ -84,7 +84,7 @@ def main() -> None:
     total_skipped = 0
 
     for filename in filenames:
-        filepath = project_root / filename
+        filepath = CSV_DIR / filename
         if not filepath.exists():
             print(f'  Not found: {filepath}')
             continue
