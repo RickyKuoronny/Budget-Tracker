@@ -1,116 +1,215 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
+import subprocess
+import importlib
+import tools.category_rules
+import tools.classify_check
 from pathlib import Path
-from budget.data_loader import find_account_files, load_account_file, clean_transactions
-from budget.categorizer import TransactionCategorizer
-import plotly.express as px
+
+importlib.reload(tools.category_rules)
+importlib.reload(tools.classify_check)
+
+from tools.classify_check import classify
+
+st.set_page_config(layout='wide', page_title='Finance', page_icon='💰')
+
+DB_PATH = Path(__file__).parent / 'transactions.db'
+ACCOUNTS = ['Everyday', 'Savings', 'Short-Term', 'All accounts']
+
+# ── CSS ────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+[data-testid="stSidebar"] { background: var(--background-color); }
+[data-testid="stSidebar"] hr { margin: 0.5rem 0; opacity: 0.3; }
+div[data-testid="metric-container"] {
+    background: #f8f8f6;
+    border: 0.5px solid rgba(0,0,0,0.08);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+}
+.stTabs [data-baseweb="tab"] { font-size: 13px; }
+.block-container { padding-top: 1.5rem; }
+</style>
+""", unsafe_allow_html=True)
 
 
-st.set_page_config(layout='wide', page_title='Personal Finance Dashboard')
+# ── Data loading ───────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_account(account: str) -> pd.DataFrame:
+    if not DB_PATH.exists():
+        return pd.DataFrame(columns=['Date', 'Description', 'Amount', 'Balance', 'Category'])
 
-st.title('Personal Finance Dashboard')
+    conn = sqlite3.connect(DB_PATH)
+    if account == 'All accounts':
+        df = pd.read_sql_query(
+            'SELECT account AS Account, date AS Date, description AS Description, '
+            'amount AS Amount, balance AS Balance FROM transactions ORDER BY date DESC',
+            conn,
+        )
+    else:
+        df = pd.read_sql_query(
+            'SELECT date AS Date, description AS Description, amount AS Amount, balance AS Balance '
+            'FROM transactions WHERE account = ? ORDER BY date DESC',
+            conn, params=(account,),
+        )
+    conn.close()
 
-# --- Load files ---
-DATA_FOLDER = Path(__file__).parent
-files = find_account_files(DATA_FOLDER)
+    if df.empty:
+        return df
 
-if not files:
-    st.error(f'No CSV/XLSX account files found in {DATA_FOLDER}. Place your account files there.')
+    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+    df['Category'] = df.apply(lambda r: classify(r['Description'], r['Amount']), axis=1)
+
+    def parse_amount(a):
+        try:
+            return float(str(a).replace('$', '').replace(',', '').strip())
+        except Exception:
+            return 0.0
+
+    df['_amt'] = df['Amount'].apply(parse_amount)
+    return df
+
+
+# ── Sidebar ────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown('### 💰 Finance')
+    st.markdown('---')
+
+    st.markdown('**Accounts**')
+    account = st.radio('account', ACCOUNTS, label_visibility='collapsed')
+
+    st.markdown('---')
+    st.markdown('**Import**')
+    if st.button('⬆ Import CSVs', use_container_width=True):
+        with st.spinner('Importing...'):
+            result = subprocess.run(
+                ['python', 'tools/import_csv.py'],
+                capture_output=True, text=True, cwd=Path(__file__).parent
+            )
+        if result.returncode == 0:
+            st.success(result.stdout)
+            st.cache_data.clear()
+        else:
+            st.error(result.stderr or 'Import failed.')
+
+
+# ── Load data ──────────────────────────────────────────────────────────────────
+if not DB_PATH.exists():
+    st.warning('No database found. Click **Import CSVs** in the sidebar to get started.')
     st.stop()
 
-# Load and clean each account
-account_dfs = []
-for f in files:
-    df = load_account_file(f)
-    df = clean_transactions(df)
-    account_dfs.append(df)
+df = load_account(account)
 
-# Keep original per-account dataframes
-accounts = {df['Account'].iloc[0]: df for df in account_dfs}
+if df.empty:
+    st.warning(f'No transactions found for **{account}**.')
+    st.stop()
 
-# Combined dataset for analysis
-combined = pd.concat([df for df in account_dfs], ignore_index=True)
 
-# Categorize
-categorizer = TransactionCategorizer()
-combined = categorizer.categorize_df(combined)
+# ── Header ─────────────────────────────────────────────────────────────────────
+st.markdown(f'## {account}')
 
-# Identify spending rows (negative Amounts)
-combined['Spending'] = combined['Amount'].apply(lambda x: -x if x < 0 else 0.0)
-combined['Income'] = combined['Amount'].apply(lambda x: x if x > 0 else 0.0)
+credits = df[df['_amt'] > 0]['_amt'].sum()
+debits  = df[df['_amt'] < 0]['_amt'].sum()
+net     = credits + debits
 
-# Sidebar filters
-st.sidebar.header('Filters')
-min_date = combined['Date'].min()
-max_date = combined['Date'].max()
-start_date, end_date = st.sidebar.date_input('Date range', [min_date, max_date])
-selected_accounts = st.sidebar.multiselect('Accounts', options=list(accounts.keys()), default=list(accounts.keys()))
-selected_categories = st.sidebar.multiselect('Categories', options=sorted(combined['Category'].unique()), default=sorted(combined['Category'].unique()))
+c1, c2, c3, c4 = st.columns(4)
+c1.metric('Money in',      f'${credits:,.0f}')
+c2.metric('Money out',     f'${abs(debits):,.0f}')
+c3.metric('Net',           f'${net:+,.0f}')
+c4.metric('Transactions',  len(df))
 
-# Apply filters to combined
-mask = (combined['Date'] >= pd.to_datetime(start_date)) & (combined['Date'] <= pd.to_datetime(end_date))
-mask &= combined['Account'].isin(selected_accounts)
-mask &= combined['Category'].isin(selected_categories)
-filtered = combined[mask]
+st.markdown('---')
 
-# --- Account Overview ---
-st.header('Account Overview')
-cols = st.columns(len(accounts))
-for i, (acct_name, df) in enumerate(accounts.items()):
-    with cols[i]:
-        st.subheader(acct_name)
-        # show current balance (first non-null Balance_Clean from top)
-        bal = df['Balance_Clean'].dropna()
-        if not bal.empty:
-            st.metric('Current balance', f'${bal.iloc[0]:,.2f}')
-        else:
-            st.write('Balance not available')
-        # recent transactions
-        recent = df.sort_values('Date', ascending=False).head(10)[['Date', 'Description', 'Amount', 'Balance_Clean']]
-        st.dataframe(recent.reset_index(drop=True), height=300)
 
-# --- Combined Spending Analysis ---
-st.header('Combined Spending Analysis')
-col1, col2 = st.columns([3,2])
+# ── Tabs ───────────────────────────────────────────────────────────────────────
+tab_tx, tab_chart, tab_cats = st.tabs(['Transactions', 'Spending chart', 'Category breakdown'])
 
-# Summary numbers
-total_spending = filtered['Spending'].sum()
-total_income = filtered['Income'].sum()
-col2.metric('Total spending', f'${total_spending:,.2f}')
-col2.metric('Total income', f'${total_income:,.2f}')
 
-# Monthly spending summary
-monthly = filtered.copy()
-monthly['YearMonth'] = monthly['Date'].dt.to_period('M').dt.to_timestamp()
-monthly_summary = monthly.groupby('YearMonth')['Spending'].sum().reset_index()
-fig_line = px.line(monthly_summary, x='YearMonth', y='Spending', title='Monthly Spending Trend')
-col1.plotly_chart(fig_line, use_container_width=True)
+# ── Tab 1: Transactions ────────────────────────────────────────────────────────
+with tab_tx:
+    col_filter, col_search = st.columns([2, 3])
 
-# Spending by category
-cat_summary = filtered.groupby('Category')['Spending'].sum().reset_index().sort_values('Spending', ascending=False)
-fig_pie = px.pie(cat_summary, values='Spending', names='Category', title='Spending by Category')
-col1.plotly_chart(fig_pie, use_container_width=True)
+    with col_filter:
+        all_cats = sorted(df['Category'].unique().tolist())
+        selected_cat = st.selectbox('Category', ['All'] + all_cats)
 
-# Which account contributes most to spending (bonus)
-acct_spend = filtered.groupby('Account')['Spending'].sum().reset_index().sort_values('Spending', ascending=False)
-st.subheader('Spending by Account')
-st.table(acct_spend)
+    with col_search:
+        search = st.text_input('Search description', placeholder='e.g. KFC, Woolworths...')
 
-# Top 5 merchants (by Description)
-st.subheader('Top 5 Spending Merchants')
-merchants = filtered[filtered['Spending']>0].groupby('Description')['Spending'].sum().reset_index().sort_values('Spending', ascending=False).head(5)
-st.table(merchants)
+    col_left, col_right = st.columns([1, 3])
 
-# Budget comparison simple
-st.subheader('Simple Budget Check')
-budget_food = st.number_input('Monthly budget for Food', value=500.0, step=50.0)
-food_spend = filtered[filtered['Category']=='Food']['Spending'].sum()
-st.write(f'Food spending in selected range: ${food_spend:,.2f}')
-if food_spend > budget_food:
-    st.warning(f'You exceeded your Food budget (${budget_food:,.2f}) by ${food_spend - budget_food:,.2f}')
-else:
-    st.success('Food spending within budget')
+    with col_left:
+        st.markdown('**Categories**')
+        cat_counts = df['Category'].value_counts().reset_index()
+        cat_counts.columns = ['Category', 'Count']
+        cat_totals = df.groupby('Category')['_amt'].sum().abs().reset_index()
+        cat_totals.columns = ['Category', 'Total']
+        cat_summary = cat_counts.merge(cat_totals, on='Category')
+        cat_summary['Total'] = cat_summary['Total'].apply(lambda x: f'${x:,.0f}')
+        st.dataframe(
+            cat_summary,
+            use_container_width=True,
+            hide_index=True,
+            height=480,
+        )
 
-# Show filtered transactions table
-st.header('Transactions (filtered)')
-st.dataframe(filtered.sort_values('Date', ascending=False).reset_index(drop=True))
+    with col_right:
+        view = df.copy()
+        if selected_cat != 'All':
+            view = view[view['Category'] == selected_cat]
+        if search:
+            view = view[view['Description'].str.contains(search, case=False, na=False)]
+
+        display_cols = ['Date', 'Description', 'Amount', 'Category']
+        if 'Account' in view.columns:
+            display_cols = ['Account'] + display_cols
+
+        st.dataframe(
+            view[display_cols].reset_index(drop=True),
+            use_container_width=True,
+            height=520,
+        )
+
+
+# ── Tab 2: Spending chart ──────────────────────────────────────────────────────
+with tab_chart:
+    debits_only = df[df['_amt'] < 0].copy()
+    debits_only['Month'] = debits_only['Date'].dt.to_period('M').astype(str)
+
+    monthly = debits_only.groupby('Month')['_amt'].sum().abs().reset_index()
+    monthly.columns = ['Month', 'Spent']
+    monthly = monthly.sort_values('Month')
+
+    if monthly.empty:
+        st.info('No spending data to chart.')
+    else:
+        st.markdown('**Monthly spending**')
+        st.bar_chart(monthly.set_index('Month')['Spent'], use_container_width=True)
+
+        st.markdown('**Spending by category**')
+        cat_spend = debits_only.groupby('Category')['_amt'].sum().abs().sort_values(ascending=False).reset_index()
+        cat_spend.columns = ['Category', 'Spent']
+        st.bar_chart(cat_spend.set_index('Category')['Spent'], use_container_width=True)
+
+
+# ── Tab 3: Category breakdown ──────────────────────────────────────────────────
+with tab_cats:
+    selected_drill = st.selectbox('Pick a category to drill into', all_cats)
+
+    drilled = df[df['Category'] == selected_drill].copy()
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric('Transactions', len(drilled))
+    d2.metric('Total spent',  f"${drilled[drilled['_amt'] < 0]['_amt'].sum().__abs__():,.2f}")
+    d3.metric('Avg per transaction', f"${drilled['_amt'].abs().mean():,.2f}")
+
+    st.markdown(f'**All {selected_drill} transactions**')
+    display_cols = ['Date', 'Description', 'Amount']
+    if 'Account' in drilled.columns:
+        display_cols = ['Account'] + display_cols
+    st.dataframe(
+        drilled[display_cols].reset_index(drop=True),
+        use_container_width=True,
+        height=440,
+    )
