@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
 import sqlite3
 import subprocess
 import importlib
@@ -543,73 +545,121 @@ with tab_chart:
 
 # ── Tab 3: Category breakdown ──────────────────────────────────────────────────
 with tab_cats:
-    cat_summary = (
-        debits_range.groupby('Category')['_amt']
-        .agg(count='count', total='sum')
+
+    # ─────────────────────────────────────────────
+    # BASE DATA (REMOVE TRANSFERS FROM EVERYTHING)
+    # ─────────────────────────────────────────────
+    base = df_range.copy()
+
+    spent_all = base[
+        (base['_amt'] < 0) &
+        (base['Category'] != 'Transfers')
+    ].copy()
+
+    # ─────────────────────────────────────────────
+    # PIE CHART (GLOBAL ONLY, NO DRILL IMPACT)
+    # ─────────────────────────────────────────────
+    pie_data = (
+        spent_all.groupby('Category')['_amt']
+        .sum()
+        .abs()
         .reset_index()
+        .rename(columns={'_amt': 'Spent'})
     )
-    cat_summary['total'] = cat_summary['total'].abs()
-    cat_summary = cat_summary.sort_values('total', ascending=False)
-    max_spend = cat_summary['total'].max() if not cat_summary.empty else 1
 
-    st.markdown(f'#### Spending by category — {range_str.split("·")[0].strip()}')
+    if not pie_data.empty:
+        fig = px.pie(
+            pie_data,
+            names='Category',
+            values='Spent',
+            hole=0.45,
+            title="Spending Breakdown"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-    cols = st.columns(2)
-    for idx, (_, row) in enumerate(cat_summary.iterrows()):
-        col  = cols[idx % 2]
-        icon = CATEGORY_ICONS.get(row['Category'], '•')
-        pct  = row['total'] / max_spend * 100
-        with col:
-            col.markdown(f"""
-            <div class="bbar">
-              <div class="bbar-top">
-                <span class="bbar-name">{icon} {row['Category']}
-                  <span class="bbar-count">×{int(row['count'])}</span>
-                </span>
-                <span class="bbar-amount">${row['total']:,.0f}</span>
-              </div>
-              <div class="bbar-track">
-                <div class="bbar-fill" style="width:{pct:.1f}%"></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
+    st.markdown("---")
 
-    st.markdown('---')
+    # ─────────────────────────────────────────────
+    # DRILL (AFFECTS ONLY METRICS + CALENDAR)
+    # ─────────────────────────────────────────────
+    all_cats = sorted(df_range['Category'].unique().tolist())
+    selected_cat = st.selectbox(
+        "Drill into category",
+        ["All"] + all_cats,
+        key="drill_cat"
+    )
 
-    all_cats_drill = sorted(df_range['Category'].unique().tolist())
-    selected_drill = st.selectbox('Drill into a category', all_cats_drill, key='drill_cat')
-
-    drilled = (df_range[df_range['Category'] == selected_drill]
-               .sort_values('Date', ascending=False))
-
-    d1, d2, d3 = st.columns(3)
-    spent_drill = drilled[drilled['_amt'] < 0]['_amt'].sum().__abs__()
-    d1.metric('Transactions', len(drilled))
-    d2.metric('Total spent',  f'${spent_drill:,.2f}')
-    avg = drilled['_amt'].abs().mean()
-    d3.metric('Avg per transaction', f'${avg:,.2f}')
-
-    drill_html = []
-    for _, row in drilled.iterrows():
-        amt     = row['_amt']
-        cls     = 'credit' if amt > 0 else 'debit'
-        amt_str = f"+${amt:,.2f}" if amt > 0 else f"−${abs(amt):,.2f}"
-        date_s = (
-        f"{row['Date'].day} {row['Date'].strftime('%b %Y')}"
-        if not pd.isna(row['Date'])
-        else ''
-        ) if not pd.isna(row['Date']) else ''
-        desc    = str(row['_display'])
-        if len(desc) > 56: desc = desc[:53] + '…'
-        drill_html.append(f"""
-        <div class="tx-row">
-          <span class="tx-body">
-            <div class="tx-desc">{desc}</div>
-          </span>
-          <span class="tx-date-inline">{date_s}</span>
-          <span class="tx-amt {cls}">{amt_str}</span>
-        </div>""")
-
-    if drill_html:
-        st.markdown(''.join(drill_html), unsafe_allow_html=True)
+    if selected_cat == "All":
+        drill = spent_all.copy()
     else:
-        st.info('No transactions in this category for the selected period.')
+        drill = spent_all[spent_all["Category"] == selected_cat].copy()
+
+    # ─────────────────────────────────────────────
+    # METRICS (KEEP YOUR STYLE)
+    # ─────────────────────────────────────────────
+    d1, d2, d3 = st.columns(3)
+
+    total_spent = drill["_amt"].sum().__abs__()
+    avg_spent = drill["_amt"].abs().mean() if len(drill) else 0
+
+    d1.metric("Transactions", len(drill))
+    d2.metric("Total spent", f"${total_spent:,.2f}")
+    d3.metric("Avg per transaction", f"${avg_spent:,.2f}")
+
+    st.markdown("---")
+
+    # ─────────────────────────────────────────────
+    # FINTECH CALENDAR HEATMAP (MONTH GRID)
+    # ─────────────────────────────────────────────
+    if not drill.empty:
+
+        drill["Date"] = pd.to_datetime(drill["Date"])
+        drill["DateOnly"] = drill["Date"].dt.date
+
+        daily = (
+            drill.groupby("DateOnly")["_amt"]
+            .sum()
+            .abs()
+            .reset_index()
+            .rename(columns={"_amt": "Spent"})
+        )
+
+        daily["DateOnly"] = pd.to_datetime(daily["DateOnly"])
+
+        # create full daily range
+        full = pd.DataFrame({
+            "Date": pd.date_range(
+                start=df_range["Date"].min(),
+                end=df_range["Date"].max(),
+                freq="D"
+            )
+        })
+
+        full["DateOnly"] = full["Date"].dt.date
+        full = full.merge(daily, on="DateOnly", how="left")
+        full["Spent"] = full["Spent"].fillna(0)
+
+        # calendar positioning
+        full["day"] = full["Date"].dt.day
+        full["month"] = full["Date"].dt.strftime("%b %Y")
+        full["weekday"] = full["Date"].dt.weekday
+
+        fig = px.density_heatmap(
+            full,
+            x="day",
+            y="month",
+            z="Spent",
+            color_continuous_scale="RdYlGn_r",
+            title="Monthly Spending Calendar"
+        )
+
+        fig.update_layout(
+            height=450,
+            xaxis_title="Day of Month",
+            yaxis_title="Month",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.info("No spending data for selected filter.")
