@@ -452,6 +452,8 @@ with tab_tx:
         view = view[view['Description'].str.contains(search, case=False, na=False)
                   | view['_display'].str.contains(search, case=False, na=False)]
 
+    # 1. Ensure the Date column is a datetime type and sort it descending (newest first)
+    view['Date'] = pd.to_datetime(view['Date'])
     view = view.sort_values('Date', ascending=False)
 
     today_d     = date.today()
@@ -466,42 +468,21 @@ with tab_tx:
             return f"{d.strftime('%A')}, {d.day} {d.strftime('%b')}"     # "Monday, 3 Jun"
         return f"{d.strftime('%A')}, {d.day} {d.strftime('%b %Y')}"
 
+    # 2. Assign the display string group
     view['_group'] = view['Date'].apply(date_group)
-
-    def group_sort_key(g):
-        if g == 'Today':
-            return (0, pd.Timestamp.max)
-        if g == 'Yesterday':
-            return (1, pd.Timestamp.max - pd.Timedelta(seconds=1))
-        
-        try:
-            # extract "3 Jun" or "3 Jun 2025" safely
-            parts = g.split(', ', 1)
-            if len(parts) == 2:
-                date_part = parts[1]
-            else:
-                date_part = parts[0]
-
-            dt = pd.to_datetime(date_part, dayfirst=True, errors='coerce')
-
-            if pd.isna(dt):
-                return (3, pd.Timestamp.min)
-
-            return (2, dt)
-
-        except Exception:
-            return (3, pd.Timestamp.min)
-        
-    groups = sorted(view['_group'].unique(), key=group_sort_key)
 
     if view.empty:
         st.info('No transactions match your filters.')
     else:
         rows_html = []
-        for grp in groups:
+        
+        # 3. FIX: Use loop-based ordering from the already sorted DataFrame.
+        # By iterating through unique groups in the order they naturally appear in 'view',
+        # they are automatically perfectly sorted from newest to oldest.
+        for grp in view['_group'].unique():
             rows_html.append(f'<div class="tx-group-header">{grp}</div>')
 
-            group_df = view[view['_group'] == grp].sort_values('Date', ascending=False)
+            group_df = view[view['_group'] == grp]
 
             for _, row in group_df.iterrows():
                 icon    = CATEGORY_ICONS.get(row['Category'], '•')
@@ -524,7 +505,6 @@ with tab_tx:
 
         st.markdown(''.join(rows_html), unsafe_allow_html=True)
         st.caption(f'{len(view):,} transaction{"s" if len(view) != 1 else ""} shown')
-
 
 # ── Tab 2: Spending chart ──────────────────────────────────────────────────────
 with tab_chart:
