@@ -367,7 +367,7 @@ credits_range = clean[clean['_amt'] > 0]
 this_spend  = abs(debits_range['_amt'].sum())
 this_income = credits_range['_amt'].sum()
 this_net    = this_income - this_spend
-transfer_total = df_range[df_range["Category"] == "Transfers"]["_amt"].abs().sum()
+transfer_total = (df_range[df_range["Category"] == "Transfers"]["_amt"].abs().sum()) / 2
 
 # Previous equivalent period for comparison
 period_days = max((end_date - start_date).days, 1)

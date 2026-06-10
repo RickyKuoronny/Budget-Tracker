@@ -1,7 +1,11 @@
 CATEGORY_RULES = {
     'Transfers': [
         'INTERNET TRANSFER DEBIT TO', 'INTERNET TRANSFER CREDIT FROM', 'INTERNET TRANSFER FROM',
-        'REVOLUT', "INTERNET EXTERNAL TRANSFER TO"
+        "INTERNET EXTERNAL TRANSFER TO"
+    ],
+
+    'Revolut': [
+        'REVOLUT', 'REVOLUT LTD', 'REVOLUT LIMITED',    
     ],
 
     'Giving': [
@@ -116,7 +120,7 @@ CATEGORY_RULES = {
 
 
 PRIORITY_CATS = [
-    'Transfers', 'Giving', 'Refunds', 'Reimbursements', 'Income',
+    'Transfers', 'Giving', 'Refunds', 'Reimbursements', 'Income', 'Revolut'
 ]
  
 STANDARD_CATS = [
