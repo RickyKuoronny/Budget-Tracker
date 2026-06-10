@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 import pandas as pd
 import sqlite3
 import subprocess
@@ -6,6 +7,8 @@ import importlib
 import tools.category_rules
 import tools.classify_check
 from pathlib import Path
+from datetime import date, timedelta
+import re
 
 importlib.reload(tools.category_rules)
 importlib.reload(tools.classify_check)
@@ -14,24 +17,239 @@ from tools.classify_check import classify
 
 st.set_page_config(layout='wide', page_title='Finance', page_icon='💰')
 
+st.write("WATCHING FILE:", os.path.abspath(__file__))
 DB_PATH = Path(__file__).parent / 'transactions.db'
 ACCOUNTS = ['Everyday', 'Savings', 'Short-Term', 'All accounts']
+
+CATEGORY_ICONS = {
+    'Food & Dining':             '🍜',
+    'Groceries':                 '🛒',
+    'Transport':                 '🚗',
+    'Shopping':                  '🛍️',
+    'Health':                    '💊',
+    'Entertainment':             '🎮',
+    'Sports & Recreation':       '🏃',
+    'Utilities & Subscriptions': '📱',
+    'Mobile Phone':              '📞',
+    'Travel':                    '✈️',
+    'Experiences':               '🎭',
+    'Giving':                    '🙏',
+    'Income':                    '💵',
+    'Transfers':                 '↔️',
+    'Reimbursements':            '↩️',
+    'Refunds':                   '↩️',
+    'Cash':                      '💸',
+    'Unsorted':                  '❓',
+}
+
+QUICK_RANGES = [
+    'Today',
+    'Last 7 days',
+    'This month',
+    'Last 3 months',
+    'Last 6 months',
+    'This year',
+    'All time',
+    'Custom range',
+]
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-[data-testid="stSidebar"] { background: var(--background-color); }
-[data-testid="stSidebar"] hr { margin: 0.5rem 0; opacity: 0.3; }
-div[data-testid="metric-container"] {
-    background: #f8f8f6;
-    border: 0.5px solid rgba(0,0,0,0.08);
-    border-radius: 10px;
-    padding: 0.75rem 1rem;
+/* ── Base typography ── */
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
 }
-.stTabs [data-baseweb="tab"] { font-size: 13px; }
-.block-container { padding-top: 1.5rem; }
+.block-container { padding-top: 1.75rem; max-width: 1200px; }
+.stTabs [data-baseweb="tab"] { font-size: 14px; font-weight: 500; }
+[data-testid="stSidebar"] hr { margin: 0.5rem 0; opacity: 0.25; }
+
+/* ── Summary cards ── */
+.card {
+    background: #fafafa;
+    border: 1px solid #ebebeb;
+    border-radius: 14px;
+    padding: 1.1rem 1.3rem 1rem;
+    margin-bottom: 0.5rem;
+}
+.card-label {
+    font-size: 0.73rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #9ca3af;
+    margin-bottom: 0.35rem;
+}
+.card-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #111;
+    line-height: 1;
+}
+.card-sub {
+    font-size: 0.8rem;
+    color: #9ca3af;
+    margin-top: 0.3rem;
+}
+.card-trend-good { color: #16a34a; font-size: 0.82rem; font-weight: 500; margin-top: 0.25rem; }
+.card-trend-bad  { color: #dc2626; font-size: 0.82rem; font-weight: 500; margin-top: 0.25rem; }
+
+/* ── Date range pill row ── */
+.range-label {
+    display: inline-block;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: #374151;
+    background: #f3f4f6;
+    border: 1px solid #e5e7eb;
+    border-radius: 20px;
+    padding: 0.3rem 0.85rem;
+    margin-bottom: 1rem;
+}
+
+/* ── Section divider label ── */
+.tx-group-header {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: #c4c8d0;
+    padding: 0.9rem 0.5rem 0.3rem;
+}
+
+/* ── Transaction row ── */
+.tx-row {
+    display: flex;
+    align-items: center;
+    padding: 0.6rem 0.6rem;
+    border-radius: 10px;
+    margin-bottom: 2px;
+    gap: 0.8rem;
+    transition: background 0.1s;
+}
+.tx-row:hover { background: #f5f6f8; }
+
+.tx-icon {
+    font-size: 1.2rem;
+    min-width: 32px;
+    text-align: center;
+    line-height: 1;
+}
+.tx-body { flex: 1; min-width: 0; }
+.tx-desc {
+    font-size: 0.92rem;
+    font-weight: 500;
+    color: #1f2937;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.tx-cat {
+    font-size: 0.73rem;
+    color: #9ca3af;
+    margin-top: 1px;
+}
+.tx-date-inline {
+    font-size: 0.73rem;
+    color: #9ca3af;
+    min-width: 50px;
+    text-align: right;
+}
+.tx-amt {
+    font-size: 0.97rem;
+    font-weight: 600;
+    min-width: 82px;
+    text-align: right;
+    letter-spacing: -0.01em;
+}
+.tx-amt.debit  { color: #dc2626; }
+.tx-amt.credit { color: #16a34a; }
+
+/* ── Category progress bars ── */
+.bbar { margin-bottom: 0.9rem; }
+.bbar-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 5px;
+}
+.bbar-name {
+    font-size: 0.88rem;
+    font-weight: 500;
+    color: #1f2937;
+}
+.bbar-count {
+    font-size: 0.73rem;
+    color: #9ca3af;
+    margin-left: 5px;
+}
+.bbar-amount {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #111;
+}
+.bbar-track {
+    background: #f0f0f0;
+    border-radius: 99px;
+    height: 7px;
+    overflow: hidden;
+}
+.bbar-fill {
+    height: 7px;
+    border-radius: 99px;
+    background: #6366f1;
+}
 </style>
 """, unsafe_allow_html=True)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def parse_amount(a) -> float:
+    try:
+        return float(str(a).replace('$', '').replace(',', '').strip())
+    except Exception:
+        return 0.0
+
+
+_NOISE = re.compile(
+    r'^(VISA PURCHASE\s*|EFTPOS WDL\s*|EFTPOS DEP\s*|OSKO PAYMENT (TO|FROM)\s*'
+    r'|NPP PAYMENT (FROM|TO)\s*|INTERNET TRANSFER (DEBIT TO|CREDIT FROM)\s*'
+    r'|DIRECT CREDIT\s*|BPAY DEBIT VIA INTERNET\s*)',
+    re.I
+)
+
+def clean_desc(raw: str) -> str:
+    """Strip leading bank boilerplate for display."""
+    s = re.sub(_NOISE, '', str(raw)).strip()
+    # Remove trailing location junk like "TOOWONG      15/03 AU AUD"
+    s = re.sub(r'\s{2,}\S+\s+\d{2}/\d{2}\s+\w+\s+\w+$', '', s).strip()
+    s = re.sub(r'\s{2,}', ' ', s)
+    return s if s else raw
+
+
+def quick_range(label: str) -> tuple[date, date]:
+    today = date.today()
+
+    if label == 'Today':
+        return today, today
+
+    if label == 'Last 7 days':
+        return today - timedelta(days=6), today
+
+    if label == 'This month':
+        return date(today.year, today.month, 1), today
+
+    if label == 'Last 3 months':
+        return today - timedelta(days=89), today
+
+    if label == 'Last 6 months':
+        return today - timedelta(days=179), today
+
+    if label == 'This year':
+        return date(today.year, 1, 1), today
+
+    return date(2000, 1, 1), today   # All time
 
 
 # ── Data loading ───────────────────────────────────────────────────────────────
@@ -58,16 +276,10 @@ def load_account(account: str) -> pd.DataFrame:
     if df.empty:
         return df
 
-    df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+    df['Date']     = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
     df['Category'] = df.apply(lambda r: classify(r['Description'], r['Amount']), axis=1)
-
-    def parse_amount(a):
-        try:
-            return float(str(a).replace('$', '').replace(',', '').strip())
-        except Exception:
-            return 0.0
-
-    df['_amt'] = df['Amount'].apply(parse_amount)
+    df['_amt']     = df['Amount'].apply(parse_amount)
+    df['_display'] = df['Description'].apply(clean_desc)
     return df
 
 
@@ -76,7 +288,7 @@ with st.sidebar:
     st.markdown('### 💰 Finance')
     st.markdown('---')
 
-    st.markdown('**Accounts**')
+    st.markdown('**Account**')
     account = st.radio('account', ACCOUNTS, label_visibility='collapsed')
 
     st.markdown('---')
@@ -96,7 +308,7 @@ with st.sidebar:
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 if not DB_PATH.exists():
-    st.warning('No database found. Click **Import CSVs** in the sidebar to get started.')
+    st.warning('No database found — click **Import CSVs** in the sidebar to get started.')
     st.stop()
 
 df = load_account(account)
@@ -105,111 +317,319 @@ if df.empty:
     st.warning(f'No transactions found for **{account}**.')
     st.stop()
 
+df['_month'] = df['Date'].dt.to_period('M')
 
-# ── Header ─────────────────────────────────────────────────────────────────────
+
+# ── Date range selector ────────────────────────────────────────────────────────
 st.markdown(f'## {account}')
 
-credits = df[df['_amt'] > 0]['_amt'].sum()
-debits  = df[df['_amt'] < 0]['_amt'].sum()
-net     = credits + debits
+rc1, rc2, rc3 = st.columns([2, 2, 3])
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric('Money in',      f'${credits:,.0f}')
-c2.metric('Money out',     f'${abs(debits):,.0f}')
-c3.metric('Net',           f'${net:+,.0f}')
-c4.metric('Transactions',  len(df))
+with rc1:
+    range_mode = st.selectbox('Date range', QUICK_RANGES, index=2, label_visibility='collapsed')
+
+if range_mode == 'Custom range':
+    with rc2:
+        start_date = st.date_input('From', value=date.today() - timedelta(days=29),
+                                   key='cust_start', label_visibility='collapsed')
+    with rc3:
+        end_date = st.date_input('To', value=date.today(),
+                                 key='cust_end', label_visibility='collapsed')
+else:
+    start_date, end_date = quick_range(range_mode)
+
+start_ts = pd.Timestamp(start_date)
+end_ts   = pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
+df_range = df[(df['Date'] >= start_ts) & (df['Date'] <= end_ts)].copy()
+
+# Range label pill
+if range_mode == 'Custom range':
+    range_str = f"{start_date.day} {start_date.strftime('%b %Y')} – {end_date.day} {end_date.strftime('%b %Y')}"
+else:
+    range_str = range_mode
+    if range_mode not in ('Today', 'This year', 'All time'):
+        range_str += (
+        f"  ·  "
+        f"{start_date.day} {start_date.strftime('%b')} – "
+        f"{end_date.day} {end_date.strftime('%b %Y')}"
+)
+
+st.markdown(f'<div class="range-label">📅 {range_str}</div>', unsafe_allow_html=True)
+
+
+# ── Summary cards ──────────────────────────────────────────────────────────────
+clean = df_range[df_range["Category"] != "Transfers"]
+
+debits_range = clean[clean['_amt'] < 0]
+credits_range = clean[clean['_amt'] > 0]
+
+this_spend  = abs(debits_range['_amt'].sum())
+this_income = credits_range['_amt'].sum()
+this_net    = this_income - this_spend
+transfer_total = df_range[df_range["Category"] == "Transfers"]["_amt"].abs().sum()
+
+# Previous equivalent period for comparison
+period_days = max((end_date - start_date).days, 1)
+prev_start  = start_date - timedelta(days=period_days)
+prev_end    = start_date - timedelta(days=1)
+prev_ts_s   = pd.Timestamp(prev_start)
+prev_ts_e   = pd.Timestamp(prev_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+prev_spend  = abs(df[(df['Date'] >= prev_ts_s) & (df['Date'] <= prev_ts_e) & (df['_amt'] < 0)]['_amt'].sum())
+
+spend_delta = this_spend - prev_spend
+
+col1, col2, col3, col4, col5 = st.columns(5)
+
+with col1:
+    if prev_spend > 0:
+        arrow = '▲' if spend_delta > 0 else '▼'
+        cls   = 'card-trend-bad' if spend_delta > 0 else 'card-trend-good'
+        trend = f'<div class="{cls}">{arrow} ${abs(spend_delta):,.0f} vs prior period</div>'
+    else:
+        trend = ''
+    st.markdown(f"""
+    <div class="card">
+        <div class="card-label">Spent</div>
+        <div class="card-value">${this_spend:,.0f}</div>
+        <div class="card-sub">{range_str.split('·')[0].strip()}</div>
+        {trend}
+    </div>""", unsafe_allow_html=True)
+
+with col2:
+    st.markdown(f"""
+    <div class="card">
+        <div class="card-label">Income</div>
+        <div class="card-value" style="color:#16a34a">${this_income:,.0f}</div>
+        <div class="card-sub">{range_str.split('·')[0].strip()}</div>
+    </div>""", unsafe_allow_html=True)
+
+with col3:
+    net_color = '#16a34a' if this_net >= 0 else '#dc2626'
+    st.markdown(f"""
+    <div class="card">
+        <div class="card-label">Net</div>
+        <div class="card-value" style="color:{net_color}">${this_net:+,.0f}</div>
+        <div class="card-sub">income minus spending</div>
+    </div>""", unsafe_allow_html=True)
+
+with col4:
+    st.markdown(f"""
+    <div class="card">
+        <div class="card-label">Transactions</div>
+        <div class="card-value">{len(df_range)}</div>
+        <div class="card-sub">{len(df):,} total in history</div>
+    </div>""", unsafe_allow_html=True)
+
+with col5:
+    st.markdown(f"""
+    <div class="card">
+        <div class="card-label">Transfers</div>
+        <div class="card-value">${transfer_total:,.0f}</div>
+        <div class="card-sub">Excluded in spending</div>
+    </div>""", unsafe_allow_html=True)
 
 st.markdown('---')
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_tx, tab_chart, tab_cats = st.tabs(['Transactions', 'Spending chart', 'Category breakdown'])
+tab_tx, tab_chart, tab_cats = st.tabs(['📋  Transactions', '📊  Spending chart', '🗂  Category breakdown'])
 
 
 # ── Tab 1: Transactions ────────────────────────────────────────────────────────
 with tab_tx:
-    col_filter, col_search = st.columns([2, 3])
+    f1, f2 = st.columns([2, 3])
+    with f1:
+        all_cats = sorted(df_range['Category'].unique().tolist())
+        selected_cat = st.selectbox('Category', ['All'] + all_cats, key='cat_filter')
+    with f2:
+        search = st.text_input('Search', placeholder='e.g. KFC, Woolworths…', key='tx_search')
 
-    with col_filter:
-        all_cats = sorted(df['Category'].unique().tolist())
-        selected_cat = st.selectbox('Category', ['All'] + all_cats)
+    view = df_range.copy()
+    if selected_cat != 'All':
+        view = view[view['Category'] == selected_cat]
+    if search:
+        view = view[view['Description'].str.contains(search, case=False, na=False)
+                  | view['_display'].str.contains(search, case=False, na=False)]
 
-    with col_search:
-        search = st.text_input('Search description', placeholder='e.g. KFC, Woolworths...')
+    view = view.sort_values('Date', ascending=False)
 
-    col_left, col_right = st.columns([1, 3])
+    today_d     = date.today()
+    yesterday_d = today_d - timedelta(days=1)
 
-    with col_left:
-        st.markdown('**Categories**')
-        cat_counts = df['Category'].value_counts().reset_index()
-        cat_counts.columns = ['Category', 'Count']
-        cat_totals = df.groupby('Category')['_amt'].sum().abs().reset_index()
-        cat_totals.columns = ['Category', 'Total']
-        cat_summary = cat_counts.merge(cat_totals, on='Category')
-        cat_summary['Total'] = cat_summary['Total'].apply(lambda x: f'${x:,.0f}')
-        st.dataframe(
-            cat_summary,
-            use_container_width=True,
-            hide_index=True,
-            height=480,
-        )
+    def date_group(d: pd.Timestamp) -> str:
+        if pd.isna(d): return 'Unknown'
+        dd = d.date()
+        if dd == today_d:     return 'Today'
+        if dd == yesterday_d: return 'Yesterday'
+        if dd.year == today_d.year:
+            return f"{d.strftime('%A')}, {d.day} {d.strftime('%b')}"     # "Monday, 3 Jun"
+        return f"{d.strftime('%A')}, {d.day} {d.strftime('%b %Y')}"
 
-    with col_right:
-        view = df.copy()
-        if selected_cat != 'All':
-            view = view[view['Category'] == selected_cat]
-        if search:
-            view = view[view['Description'].str.contains(search, case=False, na=False)]
+    view['_group'] = view['Date'].apply(date_group)
 
-        display_cols = ['Date', 'Description', 'Amount', 'Category']
-        if 'Account' in view.columns:
-            display_cols = ['Account'] + display_cols
+    def group_sort_key(g):
+        if g == 'Today':
+            return (0, pd.Timestamp.max)
+        if g == 'Yesterday':
+            return (1, pd.Timestamp.max - pd.Timedelta(seconds=1))
+        
+        try:
+            # extract "3 Jun" or "3 Jun 2025" safely
+            parts = g.split(', ', 1)
+            if len(parts) == 2:
+                date_part = parts[1]
+            else:
+                date_part = parts[0]
 
-        st.dataframe(
-            view[display_cols].reset_index(drop=True),
-            use_container_width=True,
-            height=520,
-        )
+            dt = pd.to_datetime(date_part, dayfirst=True, errors='coerce')
+
+            if pd.isna(dt):
+                return (3, pd.Timestamp.min)
+
+            return (2, dt)
+
+        except Exception:
+            return (3, pd.Timestamp.min)
+        
+    groups = sorted(view['_group'].unique(), key=group_sort_key)
+
+    if view.empty:
+        st.info('No transactions match your filters.')
+    else:
+        rows_html = []
+        for grp in groups:
+            rows_html.append(f'<div class="tx-group-header">{grp}</div>')
+
+            group_df = view[view['_group'] == grp].sort_values('Date', ascending=False)
+
+            for _, row in group_df.iterrows():
+                icon    = CATEGORY_ICONS.get(row['Category'], '•')
+                amt     = row['_amt']
+                cls     = 'credit' if amt > 0 else 'debit'
+                amt_str = f"+${amt:,.2f}" if amt > 0 else f"−${abs(amt):,.2f}"
+                desc    = str(row['_display'])
+                if len(desc) > 52:
+                    desc = desc[:49] + '…'
+
+                rows_html.append(f"""
+                <div class="tx-row">
+                <span class="tx-icon">{icon}</span>
+                <span class="tx-body">
+                    <div class="tx-desc">{desc}</div>
+                    <div class="tx-cat">{row['Category']}</div>
+                </span>
+                <span class="tx-amt {cls}">{amt_str}</span>
+                </div>""")
+
+        st.markdown(''.join(rows_html), unsafe_allow_html=True)
+        st.caption(f'{len(view):,} transaction{"s" if len(view) != 1 else ""} shown')
 
 
 # ── Tab 2: Spending chart ──────────────────────────────────────────────────────
 with tab_chart:
-    debits_only = df[df['_amt'] < 0].copy()
-    debits_only['Month'] = debits_only['Date'].dt.to_period('M').astype(str)
+    debits_df = df[df['_amt'] < 0].copy()
+    debits_df['_month'] = debits_df['Date'].dt.to_period('M')
 
-    monthly = debits_only.groupby('Month')['_amt'].sum().abs().reset_index()
-    monthly.columns = ['Month', 'Spent']
-    monthly = monthly.sort_values('Month')
+    monthly = (
+        debits_df.groupby('_month')['_amt']
+        .sum().abs()
+        .reset_index()
+        .rename(columns={'_month': 'Month', '_amt': 'Spent'})
+        .sort_values('Month')
+    )
+    monthly['Month'] = monthly['Month'].apply(lambda p: pd.Period(p, 'M').strftime('%b %Y'))
 
     if monthly.empty:
         st.info('No spending data to chart.')
     else:
-        st.markdown('**Monthly spending**')
+        st.markdown('**Monthly spending — all time**')
         st.bar_chart(monthly.set_index('Month')['Spent'], use_container_width=True)
 
-        st.markdown('**Spending by category**')
-        cat_spend = debits_only.groupby('Category')['_amt'].sum().abs().sort_values(ascending=False).reset_index()
+        st.markdown(f'**Top categories — {range_str.split("·")[0].strip()}**')
+        cat_spend = (
+            debits_range.groupby('Category')['_amt']
+            .sum().abs()
+            .sort_values(ascending=False)
+            .head(10)
+            .reset_index()
+        )
         cat_spend.columns = ['Category', 'Spent']
+        cat_spend['Category'] = cat_spend['Category'].apply(
+            lambda c: f"{CATEGORY_ICONS.get(c, '')} {c}"
+        )
         st.bar_chart(cat_spend.set_index('Category')['Spent'], use_container_width=True)
 
 
 # ── Tab 3: Category breakdown ──────────────────────────────────────────────────
 with tab_cats:
-    selected_drill = st.selectbox('Pick a category to drill into', all_cats)
+    cat_summary = (
+        debits_range.groupby('Category')['_amt']
+        .agg(count='count', total='sum')
+        .reset_index()
+    )
+    cat_summary['total'] = cat_summary['total'].abs()
+    cat_summary = cat_summary.sort_values('total', ascending=False)
+    max_spend = cat_summary['total'].max() if not cat_summary.empty else 1
 
-    drilled = df[df['Category'] == selected_drill].copy()
+    st.markdown(f'#### Spending by category — {range_str.split("·")[0].strip()}')
+
+    cols = st.columns(2)
+    for idx, (_, row) in enumerate(cat_summary.iterrows()):
+        col  = cols[idx % 2]
+        icon = CATEGORY_ICONS.get(row['Category'], '•')
+        pct  = row['total'] / max_spend * 100
+        with col:
+            col.markdown(f"""
+            <div class="bbar">
+              <div class="bbar-top">
+                <span class="bbar-name">{icon} {row['Category']}
+                  <span class="bbar-count">×{int(row['count'])}</span>
+                </span>
+                <span class="bbar-amount">${row['total']:,.0f}</span>
+              </div>
+              <div class="bbar-track">
+                <div class="bbar-fill" style="width:{pct:.1f}%"></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown('---')
+
+    all_cats_drill = sorted(df_range['Category'].unique().tolist())
+    selected_drill = st.selectbox('Drill into a category', all_cats_drill, key='drill_cat')
+
+    drilled = (df_range[df_range['Category'] == selected_drill]
+               .sort_values('Date', ascending=False))
 
     d1, d2, d3 = st.columns(3)
+    spent_drill = drilled[drilled['_amt'] < 0]['_amt'].sum().__abs__()
     d1.metric('Transactions', len(drilled))
-    d2.metric('Total spent',  f"${drilled[drilled['_amt'] < 0]['_amt'].sum().__abs__():,.2f}")
-    d3.metric('Avg per transaction', f"${drilled['_amt'].abs().mean():,.2f}")
+    d2.metric('Total spent',  f'${spent_drill:,.2f}')
+    avg = drilled['_amt'].abs().mean()
+    d3.metric('Avg per transaction', f'${avg:,.2f}')
 
-    st.markdown(f'**All {selected_drill} transactions**')
-    display_cols = ['Date', 'Description', 'Amount']
-    if 'Account' in drilled.columns:
-        display_cols = ['Account'] + display_cols
-    st.dataframe(
-        drilled[display_cols].reset_index(drop=True),
-        use_container_width=True,
-        height=440,
-    )
+    drill_html = []
+    for _, row in drilled.iterrows():
+        amt     = row['_amt']
+        cls     = 'credit' if amt > 0 else 'debit'
+        amt_str = f"+${amt:,.2f}" if amt > 0 else f"−${abs(amt):,.2f}"
+        date_s = (
+        f"{row['Date'].day} {row['Date'].strftime('%b %Y')}"
+        if not pd.isna(row['Date'])
+        else ''
+        ) if not pd.isna(row['Date']) else ''
+        desc    = str(row['_display'])
+        if len(desc) > 56: desc = desc[:53] + '…'
+        drill_html.append(f"""
+        <div class="tx-row">
+          <span class="tx-body">
+            <div class="tx-desc">{desc}</div>
+          </span>
+          <span class="tx-date-inline">{date_s}</span>
+          <span class="tx-amt {cls}">{amt_str}</span>
+        </div>""")
+
+    if drill_html:
+        st.markdown(''.join(drill_html), unsafe_allow_html=True)
+    else:
+        st.info('No transactions in this category for the selected period.')
