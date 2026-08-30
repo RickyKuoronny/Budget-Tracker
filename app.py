@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+import calendar
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -16,6 +17,29 @@ importlib.reload(tools.category_rules)
 importlib.reload(tools.classify_check)
 
 from tools.classify_check import classify
+
+# Consistent color mapping for all categories
+CATEGORY_COLORS = {
+    'Transfers': '#95A5A6',
+    'Revolut': '#3498DB',
+    'Giving': '#E74C3C',
+    'Refunds': '#2ECC71',
+    'Reimbursements': '#9B59B6',
+    'Income': '#27AE60',
+    'Mobile Phone': '#1ABC9C',
+    'Utilities & Subscriptions': '#F39C12',
+    'Groceries': '#E67E22',
+    'Food & Dining': '#D35400',
+    'Transport': '#34495E',
+    'Sports & Recreation': '#16A085',
+    'Health': '#C0392B',
+    'Shopping': '#8E44AD',
+    'Entertainment': '#2980B9',
+    'Travel': '#16A085',
+    'Experiences': '#D68910',
+    'Cash': '#7F8C8D',
+    'Unsorted': '#BDC3C7',
+}
 
 st.set_page_config(layout='wide', page_title='Finance', page_icon='💰')
 
@@ -568,13 +592,31 @@ with tab_cats:
     )
 
     if not pie_data.empty:
+        # Map colors to categories
+        pie_colors = [CATEGORY_COLORS.get(cat, '#BDC3C7') for cat in pie_data['Category']]
+        
         fig = px.pie(
             pie_data,
             names='Category',
             values='Spent',
             hole=0.45,
-            title="Spending Breakdown"
+            title="Spending Breakdown",
+            color_discrete_sequence=pie_colors
         )
+        
+        fig.update_layout(
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=1.02,
+                font=dict(size=11),
+                bgcolor="rgba(255,255,255,0.8)",
+            ),
+            height=500
+        )
+        
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
@@ -608,58 +650,139 @@ with tab_cats:
 
     st.markdown("---")
 
-    # ─────────────────────────────────────────────
-    # FINTECH CALENDAR HEATMAP (MONTH GRID)
-    # ─────────────────────────────────────────────
+
     if not drill.empty:
 
         drill["Date"] = pd.to_datetime(drill["Date"])
-        drill["DateOnly"] = drill["Date"].dt.date
 
         daily = (
-            drill.groupby("DateOnly")["_amt"]
+            drill.groupby(drill["Date"].dt.date)["_amt"]
             .sum()
             .abs()
             .reset_index()
-            .rename(columns={"_amt": "Spent"})
         )
 
-        daily["DateOnly"] = pd.to_datetime(daily["DateOnly"])
+        daily.columns = ["Date", "Spent"]
+        daily["Date"] = pd.to_datetime(daily["Date"])
 
-        # create full daily range
-        full = pd.DataFrame({
-            "Date": pd.date_range(
-                start=df_range["Date"].min(),
-                end=df_range["Date"].max(),
-                freq="D"
+        spend_lookup = {
+            d.date(): s
+            for d, s in zip(daily["Date"], daily["Spent"])
+        }
+
+        max_spend = daily["Spent"].max() if not daily.empty else 1
+
+        def cell_colour(amount):
+            if amount <= 0:
+                return "#fafafa"
+
+            pct = amount / max_spend
+
+            if pct < 0.20:
+                return "#dcfce7"
+            elif pct < 0.40:
+                return "#bbf7d0"
+            elif pct < 0.60:
+                return "#86efac"
+            elif pct < 0.80:
+                return "#fca5a5"
+            else:
+                return "#ef4444"
+
+        cal = calendar.Calendar(firstweekday=0)
+
+        start_month = drill["Date"].min()
+        end_month = drill["Date"].max()
+
+        current_year = start_month.year
+        current_month = start_month.month
+
+        while (
+            current_year < end_month.year
+            or (
+                current_year == end_month.year
+                and current_month <= end_month.month
             )
-        })
+        ):
 
-        full["DateOnly"] = full["Date"].dt.date
-        full = full.merge(daily, on="DateOnly", how="left")
-        full["Spent"] = full["Spent"].fillna(0)
+            st.markdown(
+                f"### {calendar.month_name[current_month]} {current_year}"
+            )
 
-        # calendar positioning
-        full["day"] = full["Date"].dt.day
-        full["month"] = full["Date"].dt.strftime("%b %Y")
-        full["weekday"] = full["Date"].dt.weekday
+            weeks = cal.monthdatescalendar(
+                current_year,
+                current_month
+            )
 
-        fig = px.density_heatmap(
-            full,
-            x="day",
-            y="month",
-            z="Spent",
-            color_continuous_scale="RdYlGn_r",
-            title="Monthly Spending Calendar"
-        )
+            html = """
+            <table style='width:100%; border-collapse:separate; border-spacing:6px; table-layout:fixed'>
+            <tr>
+                <th>Mon</th>
+                <th>Tue</th>
+                <th>Wed</th>
+                <th>Thu</th>
+                <th>Fri</th>
+                <th>Sat</th>
+                <th>Sun</th>
+            </tr>
+            """
 
-        fig.update_layout(
-            height=450,
-            xaxis_title="Day of Month",
-            yaxis_title="Month",
-        )
+            for week in weeks:
 
-        st.plotly_chart(fig, use_container_width=True)
+                html += "<tr>"
+
+                for day in week:
+
+                    if day.month != current_month:
+
+                        html += """
+                        <td style='height:90px;background:#f8f8f8;border-radius:10px'></td>
+                        """
+                        continue
+
+                    spend = spend_lookup.get(day, 0)
+
+                    html += f"""
+                    <td
+                        style="
+                            height:90px;
+                            vertical-align:top;
+                            border-radius:10px;
+                            padding:8px;
+                            background:{cell_colour(spend)};
+                            border:1px solid #ececec;
+                        "
+                    >
+                        <div style="
+                            font-size:12px;
+                            font-weight:600;
+                            color:#111;
+                        ">
+                            {day.day}
+                        </div>
+
+                        <div style="
+                            margin-top:8px;
+                            font-size:14px;
+                            font-weight:700;
+                            color:#111;
+                        ">
+                            ${spend:,.0f}
+                        </div>
+                    </td>
+                    """
+
+                html += "</tr>"
+
+            html += "</table>"
+
+            st.markdown(html, unsafe_allow_html=True)
+
+            if current_month == 12:
+                current_month = 1
+                current_year += 1
+            else:
+                current_month += 1
 
     else:
         st.info("No spending data for selected filter.")
